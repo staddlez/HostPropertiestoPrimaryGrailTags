@@ -1,12 +1,14 @@
 import csv
 import io
+import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Tuple
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 load_dotenv()
 
@@ -82,6 +84,27 @@ def dt_request(method: str, path: str, *, json_body=None, params=None, timeout=6
             "statusCode": None,
             "response": str(exc),
         }, None
+
+
+def ndjson_event(event_type: str, message: str = "", **extra) -> str:
+    """Serialize one live-progress event for the browser."""
+    payload = {
+        "type": event_type,
+        "message": message,
+        "ts": time.strftime("%H:%M:%S"),
+    }
+    payload.update(extra)
+    return json.dumps(payload, default=str) + "\n"
+
+
+def summarize_remote_results(results: List[Dict[str, Any]]) -> Dict[str, int]:
+    return {
+        "rows": len(results),
+        "operations": sum(int(r.get("operationCount", 0)) for r in results),
+        "successfulRows": sum(1 for r in results if r.get("success")),
+        "failedRows": sum(1 for r in results if not r.get("success")),
+        "totalWarnings": sum(len(r.get("warnings", [])) for r in results),
+    }
 
 
 def split_values(cell: str) -> List[str]:
@@ -441,6 +464,186 @@ def run_remote_config_csv():
         "/oneagents/remoteConfigurationManagement",
         params={"restart": "true" if restart else "false"},
     )
+
+
+
+@app.route("/api/remote-config/run-csv-stream", methods=["POST"])
+def run_remote_config_csv_stream():
+    """
+    Create OneAgent remote configuration jobs one CSV row at a time.
+
+    Dynatrace allows only one remote configuration management job at a time.
+    This endpoint streams progress as NDJSON, waits for the current job to finish,
+    creates the next row's job, then waits for that job to complete before moving on.
+    """
+    rows, errors = rows_from_uploaded_csv()
+    if rows is None:
+        return jsonify({"ok": False, "errors": errors}), 400
+    if errors:
+        return jsonify({"ok": False, "errors": errors, "rows": rows}), 400
+
+    restart = parse_bool(request.form.get("restart"), default=False)
+    poll_seconds = 5
+    max_wait_seconds = 30 * 60
+
+    def stream():
+        results: List[Dict[str, Any]] = []
+        yield ndjson_event(
+            "start",
+            f"Starting sequential remote config run for {len(rows)} row(s). Only one Dynatrace job will run at a time.",
+            totalRows=len(rows),
+            pollSeconds=poll_seconds,
+        )
+
+        def wait_until_idle(context: str) -> bool:
+            waited = 0
+            while True:
+                data, error = dt_request("GET", "/oneagents/remoteConfigurationManagement/current", timeout=30)
+                if error:
+                    yield ndjson_event("error", "Dynatrace configuration error while checking current job.")
+                    return False
+
+                status = data.get("statusCode")
+                yield ndjson_event(
+                    "api",
+                    f"{context}: checked current running job.",
+                    method="GET",
+                    path="/api/v2/oneagents/remoteConfigurationManagement/current",
+                    statusCode=status,
+                    ok=data.get("ok"),
+                    response=data.get("response"),
+                )
+
+                if status == 204:
+                    yield ndjson_event("idle", f"{context}: no running remote config job found. Continuing.")
+                    return True
+
+                if waited >= max_wait_seconds:
+                    yield ndjson_event("error", f"Timed out after {max_wait_seconds} seconds waiting for current job to finish.")
+                    return False
+
+                yield ndjson_event("wait", f"{context}: another job is still running. Waiting {poll_seconds}s before re-checking.")
+                time.sleep(poll_seconds)
+                waited += poll_seconds
+
+        # Prime the tenant: wait until there is no running job before starting row 1.
+        for event in wait_until_idle("Before first row"):
+            yield event
+            try:
+                parsed = json.loads(event)
+                if parsed.get("type") == "error":
+                    yield ndjson_event("done", "Stopped before creating any jobs.", ok=False, results=results, summary=summarize_remote_results(results))
+                    return
+            except Exception:
+                pass
+
+        for idx, item in enumerate(rows, start=1):
+            row_label = f"Row {item['row']} ({item['entityID']})"
+            yield ndjson_event(
+                "row_start",
+                f"Starting {row_label}: {len(item['operations'])} operation(s).",
+                row=item["row"],
+                entityID=item["entityID"],
+                entityName=item.get("entityName"),
+                operationCount=len(item["operations"]),
+                payload=item["payload"],
+            )
+
+            # Handle races: if someone else started a job since our last check, wait again.
+            create_data = None
+            attempt = 0
+            while True:
+                attempt += 1
+                yield ndjson_event(
+                    "api_start",
+                    f"{row_label}: creating remote config job, attempt {attempt}.",
+                    method="POST",
+                    path="/api/v2/oneagents/remoteConfigurationManagement",
+                    params={"restart": "true" if restart else "false"},
+                )
+                create_data, error = dt_request(
+                    "POST",
+                    "/oneagents/remoteConfigurationManagement",
+                    json_body=item["payload"],
+                    params={"restart": "true" if restart else "false"},
+                    timeout=60,
+                )
+                if error:
+                    result = {
+                        "row": item["row"],
+                        "entityName": item["entityName"],
+                        "entityID": item["entityID"],
+                        "operationCount": len(item["operations"]),
+                        "warnings": item.get("warnings", []),
+                        "success": False,
+                        "statusCode": None,
+                        "payload": item["payload"],
+                        "response": "DT_ENV and DT_TOKEN must be configured in .env.",
+                        "changes": item.get("changes", []),
+                    }
+                    results.append(result)
+                    yield ndjson_event("row_result", f"{row_label}: failed before request due to missing config.", result=result)
+                    break
+
+                yield ndjson_event(
+                    "api",
+                    f"{row_label}: create job HTTP {create_data.get('statusCode')}.",
+                    method="POST",
+                    path="/api/v2/oneagents/remoteConfigurationManagement",
+                    statusCode=create_data.get("statusCode"),
+                    ok=create_data.get("ok"),
+                    response=create_data.get("response"),
+                )
+
+                if create_data.get("statusCode") == 409:
+                    yield ndjson_event("wait", f"{row_label}: Dynatrace returned 409 because another job is running. Waiting before retry.")
+                    for event in wait_until_idle(f"{row_label} retry wait"):
+                        yield event
+                    continue
+
+                result = {
+                    "row": item["row"],
+                    "entityName": item["entityName"],
+                    "entityID": item["entityID"],
+                    "operationCount": len(item["operations"]),
+                    "warnings": item.get("warnings", []),
+                    "success": bool(create_data.get("ok")),
+                    "statusCode": create_data.get("statusCode"),
+                    "payload": item["payload"],
+                    "response": create_data.get("response"),
+                    "changes": item.get("changes", []),
+                }
+                results.append(result)
+                yield ndjson_event("row_result", f"{row_label}: create job completed with HTTP {result['statusCode']}.", result=result)
+                break
+
+            if not create_data or not create_data.get("ok"):
+                yield ndjson_event("row_done", f"{row_label}: not waiting for completion because create job failed.")
+                continue
+
+            yield ndjson_event("wait", f"{row_label}: job accepted. Waiting for it to finish before moving to the next row.")
+            for event in wait_until_idle(f"After {row_label}"):
+                yield event
+                try:
+                    parsed = json.loads(event)
+                    if parsed.get("type") == "error":
+                        yield ndjson_event("done", "Stopped while waiting for job completion.", ok=False, results=results, summary=summarize_remote_results(results))
+                        return
+                except Exception:
+                    pass
+            yield ndjson_event("row_done", f"{row_label}: job finished; next row may start.")
+
+        summary = summarize_remote_results(results)
+        yield ndjson_event(
+            "done",
+            f"Sequential remote config run finished. {summary['successfulRows']}/{summary['rows']} row(s) created successfully.",
+            ok=all(r.get("success") for r in results) if results else False,
+            endpointPath="/oneagents/remoteConfigurationManagement",
+            results=results,
+            summary=summary,
+        )
+
+    return Response(stream_with_context(stream()), mimetype="application/x-ndjson")
 
 
 @app.route("/api/remote-config/jobs", methods=["GET"])

@@ -243,6 +243,135 @@ async function postCsv(endpoint, mode, loadingText) {
   }
 }
 
+
+/* ─── Live remote-config run log ─────────────────────────────── */
+function resetLiveLog() {
+  const box = $("#liveLogSection");
+  const body = $("#liveLogBody");
+  if (!box || !body) return;
+  box.classList.remove("hidden");
+  body.innerHTML = "";
+}
+
+function appendLiveLog(evt) {
+  const body = $("#liveLogBody");
+  if (!body) return;
+  const type = evt.type || "log";
+  const klass = ["error"].includes(type) ? "err" : (["wait"].includes(type) ? "warn" : (["done", "idle", "row_done"].includes(type) ? "ok" : ""));
+  const bits = [];
+  if (evt.method) bits.push(`<span class="log-method">${escapeHtml(evt.method)}</span>`);
+  if (evt.path) bits.push(`<span class="log-path">${escapeHtml(evt.path)}</span>`);
+  if (evt.statusCode !== undefined && evt.statusCode !== null) {
+    const statusClass = Number(evt.statusCode) >= 200 && Number(evt.statusCode) < 300 ? "log-status-ok" : "log-status-bad";
+    bits.push(`<span class="${statusClass}">HTTP ${escapeHtml(evt.statusCode)}</span>`);
+  }
+  const meta = bits.length ? `<div class="log-meta">${bits.join(" ")}</div>` : "";
+  const row = document.createElement("div");
+  row.className = `log-line ${klass}`;
+  row.innerHTML = `
+    <span class="log-time">${escapeHtml(evt.ts || new Date().toLocaleTimeString())}</span>
+    <div class="log-text"><div>${escapeHtml(evt.message || type)}</div>${meta}</div>
+  `;
+  body.appendChild(row);
+  body.scrollTop = body.scrollHeight;
+}
+
+function setRunBusy(busy) {
+  setFormBusy(busy);
+  const createBtn = $("#createJob");
+  if (createBtn) createBtn.textContent = busy ? "Running sequentially…" : "4 Create job";
+}
+
+async function runRemoteConfigStream() {
+  let fd;
+  try {
+    fd = buildFormData();
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+
+  resetLiveLog();
+  renderBanner("#errorsBanner", [], "✖ Errors");
+  appendLiveLog({ type: "start", message: "Submitting CSV to local Flask proxy. The proxy will create one Dynatrace job at a time and wait between rows." });
+  setRunBusy(true);
+
+  const results = [];
+  let finalData = null;
+  try {
+    const res = await fetch("/api/remote-config/run-csv-stream", { method: "POST", body: fd });
+    if (!res.ok && !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.errors?.join("\n") || data.error || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        appendLiveLog(evt);
+
+        if (evt.type === "row_result" && evt.result) {
+          results.push(evt.result);
+          renderRows(results, "api");
+          renderSummary({ summary: {
+            rows: results.length,
+            operations: results.reduce((n, r) => n + (r.operationCount || 0), 0),
+            successfulRows: results.filter((r) => r.success).length,
+            failedRows: results.filter((r) => !r.success).length,
+            totalWarnings: results.reduce((n, r) => n + ((r.warnings || []).length), 0),
+          }});
+          $("#rawJson").textContent = JSON.stringify({ ok: false, partial: true, results }, null, 2);
+        }
+
+        if (evt.type === "done") {
+          finalData = evt;
+        }
+
+        if (evt.type === "error") {
+          renderBanner("#errorsBanner", [evt.message || "Unknown streaming error"], "✖ Error");
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      try {
+        const evt = JSON.parse(buffer);
+        appendLiveLog(evt);
+        if (evt.type === "done") finalData = evt;
+      } catch {}
+    }
+
+    if (finalData) {
+      renderRows(finalData.results || results, "api");
+      renderReview(finalData.results || results);
+      renderPayloadReview(finalData.results || results);
+      renderSummary(finalData);
+      const allWarnings = (finalData.results || []).flatMap((r) => r.warnings || []);
+      renderBanner("#warningsBanner", allWarnings, "⚠ Warnings");
+      renderBanner("#errorsBanner", finalData.ok ? [] : [finalData.message || "One or more rows failed."], "✖ Errors");
+      $("#rawJson").textContent = JSON.stringify(finalData, null, 2);
+    }
+  } catch (err) {
+    appendLiveLog({ type: "error", message: err.message });
+    $("#rawJson").textContent = JSON.stringify({ ok: false, error: err.message, results }, null, 2);
+    renderBanner("#errorsBanner", [err.message], "✖ Error");
+  } finally {
+    setRunBusy(false);
+  }
+}
+
 /* ─── Button wiring ──────────────────────────────────────────── */
 $("#buildPayload").addEventListener("click", () =>
   postCsv("/api/remote-config/build-payload-csv", "build", "Parsing CSV…")
@@ -255,8 +384,8 @@ $("#previewRemoteConfig").addEventListener("click", () =>
 );
 $("#remoteConfigForm").addEventListener("submit", (e) => {
   e.preventDefault();
-  if (!confirm("Create the remote config job in Dynatrace? This will apply to all entities in the CSV.")) return;
-  postCsv("/api/remote-config/run-csv", "api", "Creating job…");
+  if (!confirm("Create remote config jobs in Dynatrace? The app will run ONE host/job at a time and wait for each job to finish before starting the next row.")) return;
+  runRemoteConfigStream();
 });
 
 $("#clearResults").addEventListener("click", () => {
@@ -268,6 +397,10 @@ $("#clearResults").addEventListener("click", () => {
   $("#summaryBar").innerHTML = "";
   $("#warningsBanner").classList.add("hidden");
   $("#errorsBanner").classList.add("hidden");
+  const logSection = $("#liveLogSection");
+  if (logSection) logSection.classList.add("hidden");
+  const logBody = $("#liveLogBody");
+  if (logBody) logBody.innerHTML = "";
 });
 
 /* ─── Job status ─────────────────────────────────────────────── */

@@ -314,6 +314,17 @@ server1,HOST-001,"app=web,env=prod","team=ops"</pre>
         <pre id="payloadReviewJson" class="json-block">[]</pre>
       </section>
 
+      <!-- LIVE RUN LOG -->
+      <section class="card result-section hidden" id="liveLogSection">
+        <div class="section-header">
+          <div>
+            <h3>Live run log</h3>
+            <p class="muted small">Shows each Dynatrace call, HTTP result, and wait step while jobs run sequentially.</p>
+          </div>
+        </div>
+        <div id="liveLogBody" class="live-log"></div>
+      </section>
+
       <!-- API RESULTS -->
       <section class="card result-section" id="apiResultsSection">
         <div class="section-header">
