@@ -2,120 +2,296 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Dynatrace Tag Cleanup + Remote Config</title>
+  <title>Dynatrace Remote Config</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Dynatrace Utility</p>
-        <h1>Host cleanup tools</h1>
-        <p class="subtle">Local Flask proxy keeps your token server-side.</p>
+
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect width="28" height="28" rx="6" fill="#1EE6A0"/><path d="M7 14h14M14 7v14" stroke="#0a1628" stroke-width="2.5" stroke-linecap="round"/></svg>
+        <span>DT Remote Config</span>
       </div>
-      <section class="config-card">
-        <div><span>Environment</span><strong id="dtEnv">Loading...</strong></div>
-        <div><span>API Base</span><strong id="apiBase">Loading...</strong></div>
-        <div><span>Token</span><strong id="tokenMasked">Loading...</strong></div>
-      </section>
-    </header>
+      <nav class="sidenav">
+        <button class="navitem active" data-tab="tagCleanup">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M5 8h6M7 12h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Tag Cleanup
+        </button>
+        <button class="navitem" data-tab="remoteConfig">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>
+          OneAgent Remote Config
+        </button>
+        <button class="navitem" data-tab="jobStatus">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5V8l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Job Status
+        </button>
+      </nav>
+    </div>
+    <div class="sidebar-bottom">
+      <div class="env-block">
+        <div class="env-row"><span class="env-label">Environment</span><span id="dtEnv" class="env-val">—</span></div>
+        <div class="env-row"><span class="env-label">Token</span><code id="tokenMasked" class="env-val mono">—</code></div>
+        <div class="env-row"><span class="env-label">Status</span><span id="configStatus" class="badge">checking…</span></div>
+      </div>
+    </div>
+  </aside>
 
-    <nav class="tabs">
-      <button class="tab active" data-tab="tagCleanup">Tag cleanup</button>
-      <button class="tab" data-tab="remoteConfig">OneAgent remote config</button>
-    </nav>
+  <main class="content">
 
+    <!-- TAG CLEANUP PANEL -->
     <section id="tagCleanup" class="panel active">
-      <h2>Custom tag cleanup</h2>
-      <p class="subtle">Use your existing cleanup CSV flow here. This tab is kept for the original project workflow.</p>
-      <div class="notice">CSV format: <code>hostname,hostid,tagkey</code></div>
-    </section>
-
-    <section id="remoteConfig" class="panel">
-      <div class="panel-head">
+      <div class="page-header">
         <div>
-          <h2>OneAgent remote configuration</h2>
-          <p class="subtle">Build, validate, preview, create, and check OneAgent remote configuration jobs.</p>
+          <h1>Custom Tag Cleanup</h1>
+          <p class="subtitle">Add or delete custom tags on monitored entities via CSV.</p>
         </div>
-        <div class="pill">/api/v2/oneagents/remoteConfigurationManagement</div>
+        <code class="endpoint-pill">/api/v2/tags</code>
       </div>
 
-      <div class="grid two">
-        <div class="card">
-          <h3>CSV requirements</h3>
-          <p>Required columns: <code>entityName</code>, <code>entityID</code>. Any additional supported attribute columns are dynamic.</p>
-          <p>Allowed attributes: <code>group</code>, <code>hostGroup</code>, <code>hostProperty</code>, <code>hostTag</code>, <code>networkZone</code>.</p>
-          <p>Multiple values inside one cell should be comma-separated and quoted.</p>
-          <p>Select whether the generated operations should use <code>set</code> or <code>clear</code> before building/validating/creating the job.</p>
-          <pre>entityName,entityID,hostProperty,hostTag
-here.testing.com,HOST-123145,"keyOne=value,keyTwo=value","keyTag=valueTag"</pre>
-          <div class="notice small">Dynatrace preview is only supported for some operation types, especially network zone and host group. Use Validate before Create for every CSV.</div>
+      <div class="two-col">
+        <!-- LEFT: format info -->
+        <div class="card info-card">
+          <h3>CSV format</h3>
+          <p>Required columns: <code>hostname</code>, <code>id</code>. Add one or both tag columns.</p>
+          <div class="attr-chips">
+            <span class="chip">hostname</span>
+            <span class="chip">id</span>
+            <span class="chip">tagstodelete</span>
+            <span class="chip">tagstoadd</span>
+          </div>
+          <p class="muted small">Tags in each cell are comma-separated (quote the cell in Excel). Use <code>key</code> or <code>key=value</code> format.</p>
+          <pre class="code-sample">hostname,id,tagstodelete,tagstoadd
+xyz.host.net,HOST-12345,"key1,key2,env=prod","team=ops,newkey"</pre>
+          <pre class="code-sample"># Delete only
+hostname,id,tagstodelete
+xyz.host.net,HOST-12345,"key1,key2,key3"</pre>
+          <pre class="code-sample"># Add only
+hostname,id,tagstoadd
+xyz.host.net,HOST-12345,"team=ops,env=prod"</pre>
+
+          <div class="callout info">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.4"/><path d="M7 6.5V10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="4.5" r="0.7" fill="currentColor"/></svg>
+            <span>DELETE sends one request per tag key. POST batches all add-tags in one request per entity.</span>
+          </div>
+          <div class="callout warning">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L13 12H1L7 1Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7 5.5V8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="10" r="0.7" fill="currentColor"/></svg>
+            <span><strong>Delete all with key</strong> removes every tag matching the key regardless of value. Uncheck if you only want to remove a specific key=value pair.</span>
+          </div>
         </div>
 
-        <form id="remoteConfigForm" class="card">
-          <h3>Payload workflow</h3>
-          <label>
-            CSV file
-            <input id="remoteConfigFile" type="file" accept=".csv,text/csv" required>
-          </label>
+        <!-- RIGHT: form -->
+        <div class="card form-card">
+          <h3>Run tag operations</h3>
 
-          <label>
-            Operation
-            <select id="operationMode">
-              <option value="set" selected>set — add/update the CSV values</option>
-              <option value="clear">clear — remove/clear the CSV values or selected attribute</option>
-            </select>
-          </label>
-
-          <div class="notice small">
-            <strong>Set:</strong> each comma-separated cell value becomes a <code>set</code> operation.
-            <strong>Clear:</strong> each value becomes a <code>clear</code> operation. If a clear column is blank, the app sends one clear operation for that attribute without a value.
+          <div class="field">
+            <label for="tagFile">CSV file</label>
+            <div class="file-drop" id="tagFileDrop">
+              <input id="tagFile" type="file" accept=".csv,text/csv">
+              <div class="file-drop-label">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 13V3M10 3L6.5 6.5M10 3L13.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 14v1a2 2 0 002 2h10a2 2 0 002-2v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span id="tagFileLabel">Drop CSV or click to browse</span>
+              </div>
+            </div>
           </div>
 
-          <fieldset class="options-box">
-            <legend>Value cleanup options</legend>
+          <label class="toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-label">Delete all with key</span>
+              <span class="toggle-desc">Adds <code>deleteAllWithKey=true</code> — removes all tags matching the key regardless of value.</span>
+            </div>
+            <div class="toggle-wrap">
+              <input id="deleteAllWithKey" type="checkbox" checked>
+              <span class="toggle-track"></span>
+            </div>
+          </label>
 
-            <label class="check">
-              <input id="lowercaseKeyValues" type="checkbox">
-              Convert all key/value pairs to lowercase
+          <div class="workflow-actions" style="grid-template-columns: 1fr 1fr;">
+            <button type="button" class="btn step-btn" id="tagPreview">
+              <span class="step-num">1</span> Preview CSV
+            </button>
+            <button type="button" class="btn step-btn primary" id="tagRun">
+              <span class="step-num">2</span> Run operations
+            </button>
+          </div>
+          <p class="muted small" style="margin-top:4px">Preview parses the CSV locally and shows exactly what will be sent. Review before running.</p>
+        </div>
+      </div>
+
+      <!-- RESULTS -->
+      <section class="card result-section" id="tagResultSection">
+        <div class="section-header">
+          <div>
+            <h3>Results</h3>
+            <p class="muted small">Per-entity operation breakdown.</p>
+          </div>
+          <button class="btn ghost small" id="clearTagResults">Clear</button>
+        </div>
+
+        <div id="tagSummaryBar" class="summary-bar hidden"></div>
+        <div id="tagErrorsBanner" class="errors-banner hidden"></div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Row</th>
+                <th>Hostname</th>
+                <th>Entity ID</th>
+                <th>Operation</th>
+                <th>Tags</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="tagResultsBody">
+              <tr><td colspan="6" class="empty-cell">Preview or run operations to see results.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="subsection-label">Raw JSON</h4>
+        <pre id="tagRawJson" class="json-block">{}</pre>
+      </section>
+    </section>
+
+    <!-- REMOTE CONFIG PANEL -->
+    <section id="remoteConfig" class="panel">
+      <div class="page-header">
+        <div>
+          <h1>OneAgent Remote Configuration</h1>
+          <p class="subtitle">Build, validate, preview, and create remote config jobs from a CSV.</p>
+        </div>
+        <code class="endpoint-pill">/api/v2/oneagents/remoteConfigurationManagement</code>
+      </div>
+
+      <div class="two-col">
+        <!-- LEFT: CSV info -->
+        <div class="card info-card">
+          <h3>CSV format</h3>
+          <p>Required columns: <code>entityName</code>, <code>entityID</code>. Add any supported attribute columns.</p>
+          <div class="attr-chips">
+            <span class="chip">group</span>
+            <span class="chip">hostGroup</span>
+            <span class="chip">hostProperty</span>
+            <span class="chip">hostTag</span>
+            <span class="chip">networkZone</span>
+          </div>
+          <p class="muted small">Multiple values in one cell must be comma-separated and the cell quoted.</p>
+          <pre class="code-sample">entityName,entityID,hostProperty,hostTag
+server1,HOST-001,"app=web,env=prod","team=ops"</pre>
+
+          <div class="callout warning">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1L13 12H1L7 1Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7 5.5V8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="10" r="0.7" fill="currentColor"/></svg>
+            <span><strong>Dynatrace preview</strong> only works for some operation types (network zone, host group). Always <strong>Validate</strong> before creating.</span>
+          </div>
+          <div class="callout info">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.4"/><path d="M7 6.5V10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="7" cy="4.5" r="0.7" fill="currentColor"/></svg>
+            <span><strong>Blank cells with set mode</strong> produce an error — cells must have values. Use <strong>clear</strong> mode to remove values.</span>
+          </div>
+        </div>
+
+        <!-- RIGHT: Form -->
+        <form id="remoteConfigForm" class="card form-card">
+          <h3>Payload workflow</h3>
+
+          <div class="field">
+            <label for="remoteConfigFile">CSV file</label>
+            <div class="file-drop" id="fileDrop">
+              <input id="remoteConfigFile" type="file" accept=".csv,text/csv">
+              <div class="file-drop-label">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 13V3M10 3L6.5 6.5M10 3L13.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 14v1a2 2 0 002 2h10a2 2 0 002-2v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span id="fileLabel">Drop CSV or click to browse</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="operationMode">Operation mode</label>
+            <div class="select-wrap">
+              <select id="operationMode">
+                <option value="set" selected>set — add or update values</option>
+                <option value="clear">clear — remove values or attributes</option>
+              </select>
+            </div>
+          </div>
+
+          <fieldset class="options-fieldset">
+            <legend>Value cleanup</legend>
+
+            <label class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-label">Convert key/value pairs to lowercase</span>
+              </div>
+              <div class="toggle-wrap">
+                <input id="lowercaseKeyValues" type="checkbox">
+                <span class="toggle-track"></span>
+              </div>
             </label>
 
-            <label>
-              Do not convert values for these keys
-              <input id="lowercaseExceptionKeys" placeholder="example: appId,serialNumber,customerID">
-            </label>
-            <p class="subtle small-text">Comma-separated. The user decides which key values should stay exactly as provided. Keys are still normalized for consistency.</p>
+            <div class="sub-field" id="exceptionKeysField">
+              <label for="lowercaseExceptionKeys">Preserve value for these keys</label>
+              <input id="lowercaseExceptionKeys" type="text" placeholder="e.g. appId, serialNumber, customerID">
+              <p class="hint">Comma-separated. Key is still normalized; only the value is kept as-is.</p>
+            </div>
 
-            <label class="check">
-              <input id="whitespaceToUnderscore" type="checkbox">
-              Replace whitespace with underscores
+            <label class="toggle-row">
+              <div class="toggle-info">
+                <span class="toggle-label">Replace whitespace with underscores</span>
+              </div>
+              <div class="toggle-wrap">
+                <input id="whitespaceToUnderscore" type="checkbox">
+                <span class="toggle-track"></span>
+              </div>
             </label>
           </fieldset>
 
-          <label class="check">
-            <input id="restart" type="checkbox" checked>
-            Add <code>?restart=true</code> when creating the job
+          <label class="toggle-row restart-row">
+            <div class="toggle-info">
+              <span class="toggle-label">Restart OneAgents after job</span>
+              <span class="toggle-desc">Adds <code>?restart=true</code>. OneAgents will restart when the job runs.</span>
+            </div>
+            <div class="toggle-wrap">
+              <input id="restart" type="checkbox">
+              <span class="toggle-track"></span>
+            </div>
           </label>
 
-          <div class="actions wrap">
-            <button type="button" id="buildPayload">1. Build/review payload only</button>
-            <button type="button" id="validateRemoteConfig">2. Validate payload</button>
-            <button type="button" id="previewRemoteConfig">3. Dynatrace preview</button>
-            <button type="submit" class="primary">4. Create job</button>
+          <div class="workflow-actions">
+            <button type="button" class="btn step-btn" id="buildPayload">
+              <span class="step-num">1</span> Build &amp; review
+            </button>
+            <button type="button" class="btn step-btn" id="validateRemoteConfig">
+              <span class="step-num">2</span> Validate
+            </button>
+            <button type="button" class="btn step-btn" id="previewRemoteConfig">
+              <span class="step-num">3</span> DT Preview
+            </button>
+            <button type="submit" class="btn step-btn primary" id="createJob">
+              <span class="step-num">4</span> Create job
+            </button>
           </div>
-          <div class="notice small">Use <strong>Build/review payload only</strong> first to inspect the final normalized CSV values and exact Dynatrace payload before anything is sent to Dynatrace.</div>
         </form>
       </div>
 
-      <section class="card">
-        <div class="panel-head">
+      <!-- PREFLIGHT REVIEW -->
+      <section class="card result-section" id="preflightSection">
+        <div class="section-header">
           <div>
             <h3>Preflight review</h3>
-            <p class="subtle">Shows the final CSV values after lowercase/underscore options and the exact payload that will be sent to Dynatrace.</p>
+            <p class="muted small">Final values after normalization and the exact payload sent to Dynatrace.</p>
           </div>
+          <button class="btn ghost small" id="clearResults">Clear</button>
         </div>
-        <h4>Final CSV changes</h4>
+
+        <div id="summaryBar" class="summary-bar hidden"></div>
+        <div id="warningsBanner" class="warnings-banner hidden"></div>
+        <div id="errorsBanner" class="errors-banner hidden"></div>
+
+        <h4 class="subsection-label">CSV changes</h4>
         <div class="table-wrap">
           <table>
             <thead>
@@ -124,25 +300,25 @@ here.testing.com,HOST-123145,"keyOne=value,keyTwo=value","keyTag=valueTag"</pre>
                 <th>Entity</th>
                 <th>Entity ID</th>
                 <th>Attribute</th>
-                <th>Original CSV value</th>
-                <th>Final value used</th>
+                <th>Original value</th>
+                <th>Final value</th>
               </tr>
             </thead>
             <tbody id="reviewBody">
-              <tr><td colspan="6" class="empty">Build payload first to review final CSV changes.</td></tr>
+              <tr><td colspan="6" class="empty-cell">Run "Build &amp; review" to inspect changes before sending to Dynatrace.</td></tr>
             </tbody>
           </table>
         </div>
-        <h4>Resulting Dynatrace payload</h4>
-        <pre id="payloadReviewJson">[]</pre>
+
+        <h4 class="subsection-label">Dynatrace payload</h4>
+        <pre id="payloadReviewJson" class="json-block">[]</pre>
       </section>
 
-      <section class="card">
-        <div class="panel-head">
-          <h3>Payload/API results</h3>
-          <button id="clearResults" type="button">Clear</button>
+      <!-- API RESULTS -->
+      <section class="card result-section" id="apiResultsSection">
+        <div class="section-header">
+          <h3>API results</h3>
         </div>
-        <div id="summary" class="summary"></div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -155,48 +331,61 @@ here.testing.com,HOST-123145,"keyOne=value,keyTwo=value","keyTag=valueTag"</pre>
               </tr>
             </thead>
             <tbody id="resultsBody">
-              <tr><td colspan="5" class="empty">No results yet.</td></tr>
+              <tr><td colspan="5" class="empty-cell">No API results yet.</td></tr>
             </tbody>
           </table>
         </div>
-        <h4>Raw JSON</h4>
-        <pre id="rawJson">{}</pre>
-      </section>
-
-      <section class="card">
-        <div class="panel-head">
-          <div>
-            <h3>Job status tools</h3>
-            <p class="subtle">Check whether a job is running, list recent finished jobs, or fetch a specific job by ID.</p>
-          </div>
-          <button id="clearJobResults" type="button">Clear</button>
-        </div>
-
-        <div class="grid three controls">
-          <div>
-            <h4>Current running job</h4>
-            <button type="button" id="getCurrentJob">GET /current</button>
-          </div>
-
-          <div>
-            <h4>Finished jobs</h4>
-            <label>From <input id="jobsFrom" placeholder="now-7d"></label>
-            <label>To <input id="jobsTo" placeholder="now"></label>
-            <button type="button" id="listJobs">GET jobs</button>
-          </div>
-
-          <div>
-            <h4>Job by ID</h4>
-            <label>Job ID <input id="jobId" placeholder="7974003406714390819"></label>
-            <button type="button" id="getJobById">GET /{id}</button>
-          </div>
-        </div>
-
-        <h4>Job raw JSON</h4>
-        <pre id="jobRawJson">{}</pre>
+        <h4 class="subsection-label">Raw JSON</h4>
+        <pre id="rawJson" class="json-block">{}</pre>
       </section>
     </section>
+
+    <!-- JOB STATUS PANEL -->
+    <section id="jobStatus" class="panel">
+      <div class="page-header">
+        <div>
+          <h1>Job Status</h1>
+          <p class="subtitle">Query running and finished remote configuration jobs.</p>
+        </div>
+      </div>
+
+      <div class="three-col">
+        <div class="card job-card">
+          <h3>Current job</h3>
+          <p class="muted small">Returns the currently running remote config job, if any.</p>
+          <button type="button" class="btn full-width" id="getCurrentJob">GET /current</button>
+        </div>
+        <div class="card job-card">
+          <h3>Finished jobs</h3>
+          <p class="muted small">List completed jobs within a time range.</p>
+          <div class="field"><label for="jobsFrom">From</label><input id="jobsFrom" type="text" placeholder="now-7d"></div>
+          <div class="field"><label for="jobsTo">To</label><input id="jobsTo" type="text" placeholder="now"></div>
+          <button type="button" class="btn full-width" id="listJobs">GET jobs</button>
+        </div>
+        <div class="card job-card">
+          <h3>Job by ID</h3>
+          <p class="muted small">Fetch a specific job by its numeric ID.</p>
+          <div class="field"><label for="jobId">Job ID</label><input id="jobId" type="text" placeholder="7974003406714390819"></div>
+          <button type="button" class="btn full-width" id="getJobById">GET /{id}</button>
+        </div>
+      </div>
+
+      <div class="card result-section">
+        <div class="section-header">
+          <h3>Job result</h3>
+          <button class="btn ghost small" id="clearJobResults">Clear</button>
+        </div>
+        <pre id="jobRawJson" class="json-block">{}</pre>
+      </div>
+    </section>
+
   </main>
+
+  <!-- Loading overlay -->
+  <div id="loadingOverlay" class="loading-overlay hidden">
+    <div class="spinner"></div>
+    <span id="loadingLabel">Working…</span>
+  </div>
 
 <script src="/static/app.js"></script>
 </body>

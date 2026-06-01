@@ -19,7 +19,7 @@ http://127.0.0.1:5000
 ## .env
 
 ```env
-DT_ENV=https://ENVID.live.dynatrace.com
+DT_ENV=https://hcaqa.live.dynatrace.com
 DT_TOKEN=dt0c01.xxxxx
 PORT=5000
 ```

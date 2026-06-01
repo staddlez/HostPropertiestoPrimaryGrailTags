@@ -1,4 +1,3 @@
-
 import csv
 import io
 import os
@@ -92,8 +91,10 @@ def split_values(cell: str) -> List[str]:
     into:
       ["keyOne=value", "keyTwo=value"]
 
-    Quote the cell when it contains commas:
-      "keyOne=value,keyTwo=value"
+    Warns if any split part looks like it may have been an embedded comma
+    inside a value (i.e. the part has no '=' and is not a bare tag).
+    The cell is already unquoted by DictReader; commas here are always
+    treated as separators between key=value pairs.
     """
     if cell is None:
         return []
@@ -101,6 +102,25 @@ def split_values(cell: str) -> List[str]:
     if not raw:
         return []
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def detect_split_value_warnings(cell: str, values: List[str]) -> List[str]:
+    """
+    Return warning strings for parts that look suspicious after splitting —
+    specifically a part with no '=' sign following a part that had one,
+    which is a strong signal that a value contained an embedded comma.
+    """
+    warnings = []
+    prev_had_eq = False
+    for part in values:
+        has_eq = "=" in part
+        if prev_had_eq and not has_eq:
+            warnings.append(
+                f"Value part '{part}' has no '=' and may be the tail of an embedded comma "
+                f"in the previous value. Wrap cell values containing commas in quotes in your CSV."
+            )
+        prev_had_eq = has_eq
+    return warnings
 
 
 def parse_exception_keys(raw: str) -> set:
@@ -152,7 +172,11 @@ def transform_key_value(value: str, *, lowercase: bool, whitespace_to_underscore
     return f"{key}={val}"
 
 
-def parse_bool(value: str, default: bool = True) -> bool:
+def parse_bool(value: str, default: bool = False) -> bool:
+    """
+    Parse a truthy string. Default is False — callers must opt in explicitly.
+    Accepts: '1', 'true', 'yes', 'y', 'on' (case-insensitive).
+    """
     if value is None or value == "":
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -209,10 +233,19 @@ def parse_rconfig_csv(
 
         operations = []
         changes = []
+        row_warnings = []
+
         for attr in attribute_headers:
             original_cell = (row.get(attr, "") or "").strip()
             original_values = split_values(original_cell)
             values = list(original_values)
+
+            # Warn about likely embedded-comma splits for set operations
+            if operation_mode == "set" and values:
+                row_warnings.extend(
+                    f"Row {idx}, {attr}: {w}"
+                    for w in detect_split_value_warnings(original_cell, values)
+                )
 
             if operation_mode == "set":
                 values = [
@@ -234,8 +267,8 @@ def parse_rconfig_csv(
                 "changed": original_cell != final_cell,
             })
 
+            # clear with a blank cell → one bare clear op for the whole attribute
             if operation_mode == "clear" and not values:
-                # Clear can omit value. This clears the selected attribute for the entity.
                 operations.append({
                     "attribute": attr,
                     "operation": "clear",
@@ -247,14 +280,22 @@ def parse_rconfig_csv(
                     "attribute": attr,
                     "operation": operation_mode,
                 }
-                # For set, value is required. For clear, value is optional but useful when
-                # you want to clear a specific hostProperty/hostTag key or key=value entry.
                 if value:
                     op["value"] = value
                 operations.append(op)
 
+        # For set mode, a row with no operations means all cells were blank → error.
+        # For clear mode, bare clear ops are always added so this only fires if
+        # there are no attribute columns at all (caught at header validation).
         if not operations:
-            errors.append(f"Row {idx}: no operation values found.")
+            if operation_mode == "set":
+                errors.append(
+                    f"Row {idx}: no values found. "
+                    "For 'set' operations every attribute cell must have at least one value. "
+                    "Use 'clear' if you intend to remove values."
+                )
+            else:
+                errors.append(f"Row {idx}: no operation values found.")
             continue
 
         parsed_rows.append({
@@ -264,6 +305,7 @@ def parse_rconfig_csv(
             "originalCsvRow": original_csv_row,
             "finalCsvRow": final_csv_row,
             "changes": changes,
+            "warnings": row_warnings,
             "operations": operations,
             "payload": {
                 "entities": [entity_id],
@@ -279,6 +321,7 @@ def rows_from_uploaded_csv():
     if not uploaded:
         return None, ["No CSV file uploaded."]
     operation_mode = (request.form.get("operation") or "set").strip().lower()
+    # parse_bool defaults to False — normalization options are always opt-in
     lowercase_key_values = parse_bool(request.form.get("lowercaseKeyValues"), default=False)
     whitespace_to_underscore = parse_bool(request.form.get("whitespaceToUnderscore"), default=False)
     exception_keys = parse_exception_keys(request.form.get("lowercaseExceptionKeys") or "")
@@ -291,7 +334,7 @@ def rows_from_uploaded_csv():
     )
 
 
-def run_payload_endpoint(rows: List[Dict[str, Any]], endpoint_path: str, *, params=None, success_empty_204=True):
+def run_payload_endpoint(rows: List[Dict[str, Any]], endpoint_path: str, *, params=None):
     results = []
     for item in rows:
         data, error = dt_request("POST", endpoint_path, json_body=item["payload"], params=params or {})
@@ -302,6 +345,7 @@ def run_payload_endpoint(rows: List[Dict[str, Any]], endpoint_path: str, *, para
             "entityName": item["entityName"],
             "entityID": item["entityID"],
             "operationCount": len(item["operations"]),
+            "warnings": item.get("warnings", []),
             "success": data["ok"],
             "statusCode": data["statusCode"],
             "payload": item["payload"],
@@ -316,6 +360,7 @@ def run_payload_endpoint(rows: List[Dict[str, Any]], endpoint_path: str, *, para
             "operations": sum(len(r["operations"]) for r in rows),
             "successfulRows": sum(1 for r in results if r["success"]),
             "failedRows": sum(1 for r in results if not r["success"]),
+            "totalWarnings": sum(len(r.get("warnings", [])) for r in results),
         },
     })
 
@@ -351,9 +396,11 @@ def build_remote_config_csv():
     rows, errors = rows_from_uploaded_csv()
     if rows is None:
         return jsonify({"ok": False, "errors": errors}), 400
+    all_warnings = [w for r in rows for w in r.get("warnings", [])]
     return jsonify({
         "ok": len(errors) == 0,
         "errors": errors,
+        "warnings": all_warnings,
         "rows": rows,
         "row_count": len(rows),
         "operation_count": sum(len(r["operations"]) for r in rows),
@@ -388,7 +435,7 @@ def run_remote_config_csv():
     if errors:
         return jsonify({"ok": False, "errors": errors, "rows": rows}), 400
 
-    restart = parse_bool(request.form.get("restart"), default=True)
+    restart = parse_bool(request.form.get("restart"), default=False)
     return run_payload_endpoint(
         rows,
         "/oneagents/remoteConfigurationManagement",
@@ -425,6 +472,188 @@ def get_remote_config_job(job_id):
     if error:
         return error
     return jsonify(data)
+
+
+# ─── Tag cleanup ─────────────────────────────────────────────────────────────
+
+def parse_tag_csv(file_storage) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Parse a tag cleanup / add CSV.
+
+    Expected columns (case-insensitive):
+      hostname, id, tagstodelete   — for DELETE operations
+      hostname, id, tagstoadd      — for POST operations (key or key=value)
+      hostname, id, tagstodelete, tagstoadd — both in one CSV
+
+    Tags cells are comma-separated inside the quoted cell:
+      "key1,key2,key=value"
+
+    Each tag string may be:
+      - a bare key:    "mykey"      → DELETE by key, or POST {key: "mykey"}
+      - key=value:     "env=prod"   → DELETE key+value, or POST {key:"env",value:"prod"}
+    """
+    raw = file_storage.read().decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(raw), skipinitialspace=True)
+
+    if not reader.fieldnames:
+        return [], ["CSV has no header row."]
+
+    # Normalise header names to lowercase for matching, keep a map to originals
+    headers_lower = {h.strip().lower(): h.strip() for h in reader.fieldnames if h and h.strip()}
+
+    required = {"hostname", "id"}
+    missing = sorted(required - set(headers_lower))
+    if missing:
+        return [], [f"Missing required column(s): {', '.join(missing)}"]
+
+    has_delete = "tagstodelete" in headers_lower
+    has_add = "tagstoadd" in headers_lower
+    if not has_delete and not has_add:
+        return [], ["CSV must have at least one of: tagstodelete, tagstoadd"]
+
+    def parse_tag_cell(cell: str) -> List[Dict[str, str]]:
+        """Split comma-separated tag strings into {key, value?} dicts."""
+        tags = []
+        for part in [p.strip() for p in cell.split(",") if p.strip()]:
+            if "=" in part:
+                k, v = part.split("=", 1)
+                tags.append({"key": k.strip(), "value": v.strip()})
+            else:
+                tags.append({"key": part})
+        return tags
+
+    parsed_rows = []
+    errors = []
+
+    for idx, row in enumerate(reader, start=2):
+        # Normalise row keys to lowercase for lookup
+        nrow = {k.strip().lower(): (v or "").strip() for k, v in row.items()}
+
+        hostname = nrow.get("hostname", "")
+        entity_id = nrow.get("id", "")
+
+        if not entity_id:
+            errors.append(f"Row {idx}: 'id' is required.")
+            continue
+
+        delete_tags = parse_tag_cell(nrow.get("tagstodelete", "")) if has_delete else []
+        add_tags = parse_tag_cell(nrow.get("tagstoadd", "")) if has_add else []
+
+        if not delete_tags and not add_tags:
+            errors.append(f"Row {idx} ({hostname or entity_id}): no tags found in tagstodelete or tagstoadd.")
+            continue
+
+        parsed_rows.append({
+            "row": idx,
+            "hostname": hostname,
+            "entityID": entity_id,
+            "deleteTags": delete_tags,
+            "addTags": add_tags,
+        })
+
+    return parsed_rows, errors
+
+
+@app.route("/api/tags/preview-csv", methods=["POST"])
+def preview_tag_csv():
+    """Parse and return rows without calling Dynatrace."""
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify({"ok": False, "errors": ["No CSV file uploaded."]}), 400
+
+    rows, errors = parse_tag_csv(uploaded)
+    return jsonify({
+        "ok": len(errors) == 0,
+        "errors": errors,
+        "rows": rows,
+        "row_count": len(rows),
+        "delete_count": sum(len(r["deleteTags"]) for r in rows),
+        "add_count": sum(len(r["addTags"]) for r in rows),
+    })
+
+
+@app.route("/api/tags/run-csv", methods=["POST"])
+def run_tag_csv():
+    """Parse CSV and execute DELETE and/or POST tag operations against Dynatrace."""
+    uploaded = request.files.get("file")
+    if not uploaded:
+        return jsonify({"ok": False, "errors": ["No CSV file uploaded."]}), 400
+
+    rows, errors = parse_tag_csv(uploaded)
+    if not rows:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    delete_all_with_key = parse_bool(request.form.get("deleteAllWithKey"), default=True)
+    results = []
+
+    for item in rows:
+        entity_selector = f"entityId({item['entityID']})"
+        row_ops = []
+
+        # DELETE operations — one API call per tag key
+        for tag in item["deleteTags"]:
+            params: Dict[str, str] = {
+                "key": tag["key"],
+                "entitySelector": entity_selector,
+                "deleteAllWithKey": "true" if delete_all_with_key else "false",
+            }
+            if "value" in tag and not delete_all_with_key:
+                params["value"] = tag["value"]
+
+            data, error = dt_request("DELETE", "/tags", params=params)
+            if error:
+                return error
+
+            row_ops.append({
+                "operation": "DELETE",
+                "tag": tag,
+                "params": params,
+                "success": data["ok"],
+                "statusCode": data["statusCode"],
+                "response": data["response"],
+            })
+
+        # POST operations — batch all add-tags in one call per entity
+        if item["addTags"]:
+            payload = {"tags": item["addTags"]}
+            params_post = {"entitySelector": entity_selector}
+            data, error = dt_request("POST", "/tags", json_body=payload, params=params_post)
+            if error:
+                return error
+
+            row_ops.append({
+                "operation": "POST",
+                "tags": item["addTags"],
+                "params": params_post,
+                "success": data["ok"],
+                "statusCode": data["statusCode"],
+                "response": data["response"],
+            })
+
+        all_ok = all(op["success"] for op in row_ops)
+        results.append({
+            "row": item["row"],
+            "hostname": item["hostname"],
+            "entityID": item["entityID"],
+            "operations": row_ops,
+            "success": all_ok,
+        })
+
+    return jsonify({
+        "ok": all(r["success"] for r in results),
+        "results": results,
+        "summary": {
+            "rows": len(results),
+            "successfulRows": sum(1 for r in results if r["success"]),
+            "failedRows": sum(1 for r in results if not r["success"]),
+            "totalDeleteOps": sum(
+                sum(1 for op in r["operations"] if op["operation"] == "DELETE") for r in results
+            ),
+            "totalAddOps": sum(
+                sum(1 for op in r["operations"] if op["operation"] == "POST") for r in results
+            ),
+        },
+    })
 
 
 if __name__ == "__main__":
