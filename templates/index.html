@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dynatrace Tag Cleanup + Remote Config</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Dynatrace Utility</p>
+        <h1>Host cleanup tools</h1>
+        <p class="subtle">Local Flask proxy keeps your token server-side.</p>
+      </div>
+      <section class="config-card">
+        <div><span>Environment</span><strong id="dtEnv">Loading...</strong></div>
+        <div><span>API Base</span><strong id="apiBase">Loading...</strong></div>
+        <div><span>Token</span><strong id="tokenMasked">Loading...</strong></div>
+      </section>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="tagCleanup">Tag cleanup</button>
+      <button class="tab" data-tab="remoteConfig">OneAgent remote config</button>
+    </nav>
+
+    <section id="tagCleanup" class="panel active">
+      <h2>Custom tag cleanup</h2>
+      <p class="subtle">Use your existing cleanup CSV flow here. This tab is kept for the original project workflow.</p>
+      <div class="notice">CSV format: <code>hostname,hostid,tagkey</code></div>
+    </section>
+
+    <section id="remoteConfig" class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>OneAgent remote configuration</h2>
+          <p class="subtle">Build, validate, preview, create, and check OneAgent remote configuration jobs.</p>
+        </div>
+        <div class="pill">/api/v2/oneagents/remoteConfigurationManagement</div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h3>CSV requirements</h3>
+          <p>Required columns: <code>entityName</code>, <code>entityID</code>. Any additional supported attribute columns are dynamic.</p>
+          <p>Allowed attributes: <code>group</code>, <code>hostGroup</code>, <code>hostProperty</code>, <code>hostTag</code>, <code>networkZone</code>.</p>
+          <p>Multiple values inside one cell should be comma-separated and quoted.</p>
+          <p>Select whether the generated operations should use <code>set</code> or <code>clear</code> before building/validating/creating the job.</p>
+          <pre>entityName,entityID,hostProperty,hostTag
+here.testing.com,HOST-123145,"keyOne=value,keyTwo=value","keyTag=valueTag"</pre>
+          <div class="notice small">Dynatrace preview is only supported for some operation types, especially network zone and host group. Use Validate before Create for every CSV.</div>
+        </div>
+
+        <form id="remoteConfigForm" class="card">
+          <h3>Payload workflow</h3>
+          <label>
+            CSV file
+            <input id="remoteConfigFile" type="file" accept=".csv,text/csv" required>
+          </label>
+
+          <label>
+            Operation
+            <select id="operationMode">
+              <option value="set" selected>set — add/update the CSV values</option>
+              <option value="clear">clear — remove/clear the CSV values or selected attribute</option>
+            </select>
+          </label>
+
+          <div class="notice small">
+            <strong>Set:</strong> each comma-separated cell value becomes a <code>set</code> operation.
+            <strong>Clear:</strong> each value becomes a <code>clear</code> operation. If a clear column is blank, the app sends one clear operation for that attribute without a value.
+          </div>
+
+          <fieldset class="options-box">
+            <legend>Value cleanup options</legend>
+
+            <label class="check">
+              <input id="lowercaseKeyValues" type="checkbox">
+              Convert all key/value pairs to lowercase
+            </label>
+
+            <label>
+              Do not convert values for these keys
+              <input id="lowercaseExceptionKeys" placeholder="example: appId,serialNumber,customerID">
+            </label>
+            <p class="subtle small-text">Comma-separated. The user decides which key values should stay exactly as provided. Keys are still normalized for consistency.</p>
+
+            <label class="check">
+              <input id="whitespaceToUnderscore" type="checkbox">
+              Replace whitespace with underscores
+            </label>
+          </fieldset>
+
+          <label class="check">
+            <input id="restart" type="checkbox" checked>
+            Add <code>?restart=true</code> when creating the job
+          </label>
+
+          <div class="actions wrap">
+            <button type="button" id="buildPayload">1. Build/review payload only</button>
+            <button type="button" id="validateRemoteConfig">2. Validate payload</button>
+            <button type="button" id="previewRemoteConfig">3. Dynatrace preview</button>
+            <button type="submit" class="primary">4. Create job</button>
+          </div>
+          <div class="notice small">Use <strong>Build/review payload only</strong> first to inspect the final normalized CSV values and exact Dynatrace payload before anything is sent to Dynatrace.</div>
+        </form>
+      </div>
+
+      <section class="card">
+        <div class="panel-head">
+          <div>
+            <h3>Preflight review</h3>
+            <p class="subtle">Shows the final CSV values after lowercase/underscore options and the exact payload that will be sent to Dynatrace.</p>
+          </div>
+        </div>
+        <h4>Final CSV changes</h4>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Row</th>
+                <th>Entity</th>
+                <th>Entity ID</th>
+                <th>Attribute</th>
+                <th>Original CSV value</th>
+                <th>Final value used</th>
+              </tr>
+            </thead>
+            <tbody id="reviewBody">
+              <tr><td colspan="6" class="empty">Build payload first to review final CSV changes.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h4>Resulting Dynatrace payload</h4>
+        <pre id="payloadReviewJson">[]</pre>
+      </section>
+
+      <section class="card">
+        <div class="panel-head">
+          <h3>Payload/API results</h3>
+          <button id="clearResults" type="button">Clear</button>
+        </div>
+        <div id="summary" class="summary"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Row</th>
+                <th>Entity</th>
+                <th>Entity ID</th>
+                <th>Operations</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody">
+              <tr><td colspan="5" class="empty">No results yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h4>Raw JSON</h4>
+        <pre id="rawJson">{}</pre>
+      </section>
+
+      <section class="card">
+        <div class="panel-head">
+          <div>
+            <h3>Job status tools</h3>
+            <p class="subtle">Check whether a job is running, list recent finished jobs, or fetch a specific job by ID.</p>
+          </div>
+          <button id="clearJobResults" type="button">Clear</button>
+        </div>
+
+        <div class="grid three controls">
+          <div>
+            <h4>Current running job</h4>
+            <button type="button" id="getCurrentJob">GET /current</button>
+          </div>
+
+          <div>
+            <h4>Finished jobs</h4>
+            <label>From <input id="jobsFrom" placeholder="now-7d"></label>
+            <label>To <input id="jobsTo" placeholder="now"></label>
+            <button type="button" id="listJobs">GET jobs</button>
+          </div>
+
+          <div>
+            <h4>Job by ID</h4>
+            <label>Job ID <input id="jobId" placeholder="7974003406714390819"></label>
+            <button type="button" id="getJobById">GET /{id}</button>
+          </div>
+        </div>
+
+        <h4>Job raw JSON</h4>
+        <pre id="jobRawJson">{}</pre>
+      </section>
+    </section>
+  </main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
